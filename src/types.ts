@@ -92,6 +92,8 @@ export interface Task {
   failAt: number | null;
   /** Real mode: terminal status reported by the backend, applied once the agent is at work. */
   pendingStatus?: 'completed' | 'failed';
+  /** Real mode: how many backend log entries have been merged so far. */
+  remoteLogCount?: number;
 }
 
 export interface Activity {

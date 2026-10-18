@@ -7,10 +7,15 @@ services:
     container_name: agent-office
     restart: unless-stopped
     env_file: /etc/agent-office.env   # GEMINI_API_KEY lives here, not in the repo
-    ports:
-      - "127.0.0.1:8787:8787"          # only nginx on this host can reach it
     volumes:
       - agent-office-data:/data
+    networks:
+      - snapeld_net                   # reached by snapeld-nginx as agent-office:8787
 
 volumes:
   agent-office-data:
+
+networks:
+  snapeld_net:
+    external: true
+    name: snapeld_snapeld_net

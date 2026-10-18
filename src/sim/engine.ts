@@ -278,7 +278,12 @@ export class Simulation {
     if (task.status === 'cancelled' || task.status === 'completed' || task.status === 'failed') return;
     if (update.progress !== undefined) task.progress = Math.max(0, Math.min(1, update.progress));
     if (update.output !== undefined) task.output = update.output;
-    if (update.logs) for (const l of update.logs.slice(task.logs.length)) task.logs.push(l);
+    if (update.logs) {
+      // Backend logs are counted separately from the local ones they are merged into.
+      const seen = task.remoteLogCount ?? 0;
+      for (const l of update.logs.slice(seen)) task.logs.push({ ...l, msg: `[backend] ${l.msg}` });
+      task.remoteLogCount = Math.max(seen, update.logs.length);
+    }
     // The local state machine owns queued → running (the agent has to walk to its
     // desk first); the backend's final verdict is applied once the agent is working.
     if (update.status === 'cancelled') this.cancelTask(task.id);
@@ -394,7 +399,8 @@ export class Simulation {
     } else {
       if (task.simulated && !task.output) task.output = `[Simulated failure] The demo run stopped at ${Math.round(task.progress * 100)}%. Retry to run it again.`;
       transition(agent, 'ERROR', this.state.clock);
-      this.log('error', `${agent.name} failed “${task.title}”`, agent.id, task.id);
+      const reason = task.simulated ? '' : failureReason(task);
+      this.log('error', `${agent.name} failed “${task.title}”${reason ? `: ${reason}` : ''}`, agent.id, task.id);
     }
   }
 
@@ -551,6 +557,14 @@ export class Simulation {
       }
     }
   }
+}
+
+/** Real mode: the most useful one-line reason for a failed task. */
+function failureReason(task: Task): string {
+  const fromOutput = task.output?.split('\n').reverse().find((l) => l.startsWith('[error]'));
+  if (fromOutput) return fromOutput.replace('[error]', '').trim().slice(0, 200);
+  const fromLog = [...task.logs].reverse().find((l) => l.level === 'error' && l.msg.startsWith('[backend]'));
+  return fromLog ? fromLog.msg.replace('[backend]', '').trim().slice(0, 200) : '';
 }
 
 function milestone(agent: Agent, m: number): string {

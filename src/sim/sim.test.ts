@@ -237,6 +237,25 @@ describe('agent state machine', () => {
     expect(sim.state.activity.map((a) => a.msg)).toEqual(['first', 'second']);
   });
 
+  it('shows the backend error reason when a real task fails', () => {
+    const { sim, agent } = newSim();
+    sim.createTask({ title: 'salom', description: '', agentId: agent.id }, { simulated: false, id: 'r2' });
+    sim.applyRemoteTask({ id: 'r2', status: 'running', logs: [{ t: 1, level: 'info', msg: 'Accepted' }] });
+    sim.applyRemoteTask({
+      id: 'r2',
+      status: 'failed',
+      output: '[error] Gemini error: API key not valid',
+      logs: [
+        { t: 1, level: 'info', msg: 'Accepted' },
+        { t: 2, level: 'error', msg: 'Gemini error: API key not valid' },
+      ],
+    });
+    runUntil(sim, agent, () => agent.state === 'ERROR');
+    const task = sim.state.tasks.r2;
+    expect(task.logs.filter((l) => l.msg.startsWith('[backend]')).map((l) => l.msg)).toEqual(['[backend] Accepted', '[backend] Gemini error: API key not valid']);
+    expect(sim.state.activity[sim.state.activity.length - 1].msg).toBe('Test failed “salom”: Gemini error: API key not valid');
+  });
+
   it('linger timings are sane', () => {
     expect(COMPLETED_LINGER_MS).toBeGreaterThan(1000);
   });

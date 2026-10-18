@@ -4,8 +4,9 @@
 //
 // Configuration (environment variables):
 //   GEMINI_API_KEY      required. Never put this in frontend code.
-//   GEMINI_MODEL        model id from AI Studio (default: gemini-2.5-flash)
-//   GEMINI_MAX_TOKENS   max output tokens per task (default: 4096)
+//   GEMINI_MODEL        model id from AI Studio (default: gemini-flash-latest, an alias
+//                       Google keeps pointing at the current Flash model)
+//   GEMINI_MAX_TOKENS   max output tokens per task, thinking included (default: 8192)
 //   PORT / HOST         listen address (default: 127.0.0.1:8787, i.e. behind nginx)
 //   ALLOWED_ORIGIN      CORS origin, e.g. http://18.225.82.97 (default: same-origin only)
 //   MAX_CONCURRENCY     tasks sent to Gemini at once (default: 2, protects your quota)
@@ -23,8 +24,8 @@ if (!API_KEY) {
   console.error('GEMINI_API_KEY is not set. Put it in /etc/agent-office.env (see README).');
   process.exit(1);
 }
-const MODEL = env.GEMINI_MODEL || 'gemini-2.5-flash';
-const MAX_TOKENS = Number(env.GEMINI_MAX_TOKENS || 4096);
+const MODEL = env.GEMINI_MODEL || 'gemini-flash-latest';
+const MAX_TOKENS = Number(env.GEMINI_MAX_TOKENS || 8192);
 const PORT = Number(env.PORT || 8787);
 const HOST = env.HOST || '127.0.0.1';
 const ALLOWED_ORIGIN = env.ALLOWED_ORIGIN || '';
@@ -60,7 +61,9 @@ function load() {
   }
 }
 const state = load();
-for (const a of state.agents) Object.assign(a, { provider: 'google', model: a.model || MODEL });
+// Agents follow GEMINI_MODEL unless one was set explicitly for that agent
+// (modelOverride). Older state files stored the default as `model`; drop it.
+for (const a of state.agents) Object.assign(a, { provider: 'google', model: a.modelOverride || MODEL });
 // Anything left running by a previous process can't be resumed.
 for (const t of state.tasks) if (t.status === 'running' || t.status === 'queued') Object.assign(t, { status: 'failed', output: 'Server restarted before this task finished. Assign it again.' });
 const tasks = new Map(state.tasks.map((t) => [t.id, t]));
@@ -246,7 +249,8 @@ const server = http.createServer(async (req, res) => {
     if (parts[1] === 'agents' && req.method === 'POST') {
       const b = await readBody(req);
       if (!b?.name || !ROLES.includes(b.role)) return send(res, 400, { error: `name and role (${ROLES.join(', ')}) are required` });
-      const agent = { id: `gm-${randomUUID().slice(0, 8)}`, name: String(b.name).slice(0, 40), role: b.role, provider: 'google', model: b.model || MODEL, enabled: true };
+      const override = b.model ? String(b.model).slice(0, 80) : undefined;
+      const agent = { id: `gm-${randomUUID().slice(0, 8)}`, name: String(b.name).slice(0, 40), role: b.role, provider: 'google', model: override || MODEL, modelOverride: override, enabled: true };
       state.agents.push(agent);
       save();
       return send(res, 201, agent);
@@ -297,4 +301,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => console.log(`Agent Office backend on http://${HOST}:${PORT} using ${MODEL}`));
+server.listen(PORT, HOST, () => {
+  console.log(`Agent Office backend on http://${HOST}:${PORT} using ${MODEL}`);
+  // Fail loudly at startup if the configured model can't be used with this key.
+  fetch(`${GEMINI_BASE}/v1beta/models/${encodeURIComponent(MODEL)}`, { headers: { 'x-goog-api-key': API_KEY } })
+    .then(async (r) => {
+      if (r.ok) return console.log(`Model check OK: ${MODEL}`);
+      let msg = `${r.status}`;
+      try {
+        msg = (await r.json()).error?.message ?? msg;
+      } catch {}
+      console.error(`Model check FAILED for ${MODEL}: ${msg}`);
+    })
+    .catch((e) => console.error(`Model check could not reach Gemini: ${e.message}`));
+});
