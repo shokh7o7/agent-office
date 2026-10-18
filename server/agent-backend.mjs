@@ -146,26 +146,40 @@ async function runTask(task) {
     const decoder = new TextDecoder();
     let buf = '';
     let finishReason = null;
+    let blockReason = null;
+    // Gemini separates SSE events with CRLF; normalise so "\n\n" splits work.
+    const handleEvent = (event) => {
+      for (const line of event.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        const json = JSON.parse(payload);
+        if (json.error) throw new Error(`Gemini error: ${json.error.message ?? json.error.status ?? 'unknown'}`);
+        blockReason = json.promptFeedback?.blockReason ?? blockReason;
+        const cand = json.candidates?.[0];
+        // Skip thought summaries; keep only the answer text.
+        task.output += cand?.content?.parts?.filter((p) => !p.thought).map((p) => p.text ?? '').join('') ?? '';
+        finishReason = cand?.finishReason ?? finishReason;
+      }
+    };
     for (;;) {
       const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
+      if (value) buf += decoder.decode(value, { stream: !done });
+      buf = buf.replace(/\r\n/g, '\n');
       let cut;
       while ((cut = buf.indexOf('\n\n')) >= 0) {
-        const chunk = buf.slice(0, cut);
+        handleEvent(buf.slice(0, cut));
         buf = buf.slice(cut + 2);
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const json = JSON.parse(line.slice(5));
-          const cand = json.candidates?.[0];
-          task.output += cand?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
-          finishReason = cand?.finishReason ?? finishReason;
-        }
+      }
+      if (done) {
+        if (buf.trim()) handleEvent(buf); // last event may lack a trailing blank line
+        break;
       }
       // There is no true percentage for an LLM answer; estimate from length.
       task.progress = Math.min(0.95, 0.1 + 0.85 * (1 - Math.exp(-task.output.length / 2500)));
       publish(task, false);
     }
+    if (blockReason) throw new Error(`Gemini blocked the prompt (${blockReason})`);
     if (task.status !== 'running') return; // cancelled meanwhile
     if (!task.output.trim()) throw new Error(`Gemini returned no text (finish reason: ${finishReason ?? 'unknown'})`);
     task.status = 'completed';
