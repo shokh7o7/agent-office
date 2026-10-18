@@ -12,7 +12,8 @@ RUN npm run build
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787 STATIC_DIR=/app/dist DATA_FILE=/data/state.json
-COPY server/agent-backend.mjs server/agent-backend.mjs
+COPY server/*.mjs server/
+COPY server/runner/*.mjs server/runner/
 COPY --from=build /app/dist dist
 RUN mkdir -p /data && chown node:node /data
 USER node
