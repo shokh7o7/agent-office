@@ -40,6 +40,14 @@ const RUNNER_TOKEN = env.RUNNER_TOKEN || '';
 const hub = new RunnerHub();
 const pendingApprovals = new Map(); // approvalId -> { resolve, taskId }
 
+/** Log a Gemini overload retry on the task so the user sees it is waiting, not stuck. */
+function retryLogger(task) {
+  return ({ status, waitMs, attempt }) => {
+    log(task, 'warn', `Gemini band (${status}), ${Math.round(waitMs / 1000)} s dan keyin qayta urinadi (${attempt}-urinish)`);
+    publish(task);
+  };
+}
+
 const ROLE_PROMPTS = {
   Developer: 'You are a senior software developer. Give working code and brief, precise explanations.',
   Researcher: 'You are a careful researcher. Structure findings clearly and say when something is uncertain.',
@@ -150,7 +158,7 @@ async function runTask(task) {
         hub,
         deps: {
           callGemini: (contents, tools, systemText) =>
-            generate({ base: GEMINI_BASE, apiKey: API_KEY, model, systemText, contents, tools, maxTokens: MAX_TOKENS, signal: ctrl.signal }),
+            generate({ base: GEMINI_BASE, apiKey: API_KEY, model, systemText, contents, tools, maxTokens: MAX_TOKENS, signal: ctrl.signal, onRetry: retryLogger(task) }),
           onLog: (level, msg) => {
             log(task, level, msg);
             publish(task, false);
@@ -174,6 +182,7 @@ async function runTask(task) {
         contents: [{ role: 'user', parts: [{ text: task.description ? `${task.title}\n\n${task.description}` : task.title }] }],
         maxTokens: MAX_TOKENS,
         signal: ctrl.signal,
+        onRetry: retryLogger(task),
         onDelta: (chunk) => {
           task.output += chunk;
           task.progress = Math.min(0.95, 0.1 + 0.85 * (1 - Math.exp(-task.output.length / 2500)));

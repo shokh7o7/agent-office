@@ -7,6 +7,31 @@ function endpoint(base, model, method) {
   return `${base}/${V}/models/${encodeURIComponent(model)}:${method}`;
 }
 
+// Gemini answers 429/5xx when overloaded ("high demand"). Those are usually
+// temporary, so retry a few times with growing pauses before giving up.
+const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRY_DELAYS_MS = (process.env.GEMINI_RETRY_DELAYS_MS || '3000,8000,20000').split(',').map(Number);
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Cancelled'));
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('Cancelled')); }, { once: true });
+  });
+}
+
+async function fetchWithRetry(url, init, onRetry) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, init);
+    if (res.ok || !RETRY_STATUS.has(res.status) || attempt >= RETRY_DELAYS_MS.length) return res;
+    let detail = `${res.status}`;
+    try { detail = (await res.json()).error?.message ?? detail; } catch {}
+    const wait = RETRY_DELAYS_MS[attempt];
+    onRetry?.({ status: res.status, detail, waitMs: wait, attempt: attempt + 1 });
+    await sleep(wait, init.signal);
+  }
+}
+
 async function readError(res) {
   let detail = `${res.status}`;
   try {
@@ -19,8 +44,8 @@ async function readError(res) {
  * Stream a plain text answer. Calls onDelta(textChunk) as it arrives.
  * Returns { text, finishReason }. Throws on HTTP or block errors.
  */
-export async function streamText({ base, apiKey, model, systemText, contents, maxTokens, signal, onDelta }) {
-  const res = await fetch(endpoint(base, model, 'streamGenerateContent') + '?alt=sse', {
+export async function streamText({ base, apiKey, model, systemText, contents, maxTokens, signal, onDelta, onRetry }) {
+  const res = await fetchWithRetry(endpoint(base, model, 'streamGenerateContent') + '?alt=sse', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify({
@@ -29,7 +54,7 @@ export async function streamText({ base, apiKey, model, systemText, contents, ma
       generationConfig: { maxOutputTokens: maxTokens },
     }),
     signal,
-  });
+  }, onRetry);
   if (!res.ok) throw new Error(await readError(res));
 
   const reader = res.body.getReader();
@@ -79,8 +104,8 @@ export async function streamText({ base, apiKey, model, systemText, contents, ma
  * One non-streamed call that may return function calls.
  * Returns { text, functionCalls: [{name, args}], finishReason }.
  */
-export async function generate({ base, apiKey, model, systemText, contents, tools, maxTokens, signal }) {
-  const res = await fetch(endpoint(base, model, 'generateContent'), {
+export async function generate({ base, apiKey, model, systemText, contents, tools, maxTokens, signal, onRetry }) {
+  const res = await fetchWithRetry(endpoint(base, model, 'generateContent'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify({
@@ -90,7 +115,7 @@ export async function generate({ base, apiKey, model, systemText, contents, tool
       generationConfig: { maxOutputTokens: maxTokens },
     }),
     signal,
-  });
+  }, onRetry);
   if (!res.ok) throw new Error(await readError(res));
   const json = await res.json();
   if (json.promptFeedback?.blockReason) throw new Error(`Gemini blocked the prompt (${json.promptFeedback.blockReason})`);
