@@ -33,6 +33,15 @@ export interface RemoteTask {
   progress: number;
   output?: string;
   logs?: TaskLog[];
+  deviceId?: string;
+  pendingApproval?: { approvalId: string; label: string; reason?: string; name: string } | null;
+}
+
+export interface RemoteDevice {
+  id: string;
+  name: string;
+  workDir?: string | null;
+  online: boolean;
 }
 
 export interface RemoteActivity {
@@ -57,8 +66,10 @@ export interface Backend {
   listAgents(): Promise<RemoteAgent[]>;
   createAgent(input: RemoteAgentInput): Promise<RemoteAgent>;
   listTasks(): Promise<RemoteTask[]>;
-  createTask(input: { title: string; description: string; agentId: string }): Promise<RemoteTask>;
+  createTask(input: { title: string; description: string; agentId: string; deviceId?: string }): Promise<RemoteTask>;
   getTask(id: string): Promise<RemoteTask>;
   cancelTask(id: string): Promise<RemoteTask>;
   listActivity(): Promise<RemoteActivity[]>;
+  listDevices(): Promise<RemoteDevice[]>;
+  respondApproval(approvalId: string, approve: boolean): Promise<void>;
 }

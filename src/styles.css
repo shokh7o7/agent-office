@@ -1041,3 +1041,46 @@ h4 {
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------- PC approvals */
+.approvals {
+  position: fixed;
+  left: 50%;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 55;
+  display: grid;
+  gap: 8px;
+  width: min(460px, calc(100% - 24px));
+}
+.approval {
+  background: var(--panel);
+  border: 2px solid var(--ink);
+  box-shadow: 3px 3px 0 var(--ink);
+  border-left: 8px solid var(--amber);
+  padding: 10px 12px;
+}
+.approval-head {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.approval-cmd {
+  display: block;
+  background: var(--ink);
+  color: #fff;
+  padding: 5px 8px;
+  font: 12.5px/1.4 ui-monospace, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval-reason {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}

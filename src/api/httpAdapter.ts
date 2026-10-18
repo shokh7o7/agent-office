@@ -1,4 +1,4 @@
-import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteTask } from './adapter';
+import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteDevice, RemoteTask } from './adapter';
 
 /** Real mode: talks to a backend implementing the contract in adapter.ts. */
 export class HttpBackend implements Backend {
@@ -76,7 +76,7 @@ export class HttpBackend implements Backend {
   listTasks() {
     return this.req<RemoteTask[]>('/api/tasks');
   }
-  createTask(input: { title: string; description: string; agentId: string }) {
+  createTask(input: { title: string; description: string; agentId: string; deviceId?: string }) {
     return this.req<RemoteTask>('/api/tasks', { method: 'POST', body: JSON.stringify(input) });
   }
   getTask(id: string) {
@@ -87,5 +87,11 @@ export class HttpBackend implements Backend {
   }
   listActivity() {
     return this.req<RemoteActivity[]>('/api/activity');
+  }
+  listDevices() {
+    return this.req<RemoteDevice[]>('/api/devices');
+  }
+  respondApproval(approvalId: string, approve: boolean) {
+    return this.req<void>(`/api/approvals/${encodeURIComponent(approvalId)}/${approve ? 'approve' : 'deny'}`, { method: 'POST' });
   }
 }

@@ -94,6 +94,10 @@ export interface Task {
   pendingStatus?: 'completed' | 'failed';
   /** Real mode: how many backend log entries have been merged so far. */
   remoteLogCount?: number;
+  /** Real mode: PC runner this task runs on, if any. */
+  deviceId?: string;
+  /** Real mode: a risky action waiting for the user's approval. */
+  pendingApproval?: { approvalId: string; label: string; reason?: string; name: string } | null;
 }
 
 export interface Activity {

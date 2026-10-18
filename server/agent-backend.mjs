@@ -13,10 +13,13 @@
 //   DATA_FILE           where agents/tasks are saved (default: ./data/state.json)
 //   GEMINI_BASE_URL     override for testing (default: Google's endpoint)
 //   STATIC_DIR          if set, also serves the built frontend from this folder
+//   RUNNER_TOKEN        if set, PC runners must present it to connect (recommended)
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { streamText, generate, checkModel } from './gemini.mjs';
+import { RunnerHub, runWithTools } from './runner/session.mjs';
 
 const env = process.env;
 const API_KEY = env.GEMINI_API_KEY;
@@ -33,6 +36,9 @@ const MAX_CONCURRENCY = Math.max(1, Number(env.MAX_CONCURRENCY || 2));
 const DATA_FILE = path.resolve(env.DATA_FILE || './data/state.json');
 const STATIC_DIR = env.STATIC_DIR ? path.resolve(env.STATIC_DIR) : '';
 const GEMINI_BASE = (env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+const RUNNER_TOKEN = env.RUNNER_TOKEN || '';
+const hub = new RunnerHub();
+const pendingApprovals = new Map(); // approvalId -> { resolve, taskId }
 
 const ROLE_PROMPTS = {
   Developer: 'You are a senior software developer. Give working code and brief, precise explanations.',
@@ -43,6 +49,17 @@ const ROLE_PROMPTS = {
   Analyst: 'You are a data analyst. Show your reasoning, assumptions and the key numbers.',
   Manager: 'You are a project manager. Break work into steps with owners, risks and next actions.',
 };
+
+function systemFor(agent, withTools) {
+  const base = `${ROLE_PROMPTS[agent?.role] ?? ''} Your name is ${agent?.name ?? 'Agent'}.`;
+  if (!withTools) return base;
+  return (
+    base +
+    ' You can act on the user\'s PC through the provided tools, but only inside their chosen work folder. ' +
+    'Work in small steps: inspect files before changing them, make one change at a time, and run tests when relevant. ' +
+    'Deletions move files to the Recycle Bin. When the task is done, reply with a short summary of what you changed.'
+  );
+}
 
 // ---------------------------------------------------------------- state
 const DEFAULT_AGENTS = [
@@ -114,77 +131,63 @@ async function runTask(task) {
   running.set(task.id, ctrl);
   task.status = 'running';
   task.progress = 0.05;
-  log(task, 'info', `Sent to ${agent?.model || MODEL}`);
+  task.output = '';
+  const model = agent?.model || MODEL;
+  const onDevice = task.deviceId && hub.isOnline(task.deviceId);
+  log(task, 'info', onDevice ? `Working on PC “${deviceName(task.deviceId)}” via ${model}` : `Sent to ${model}`);
   publish(task);
 
-  const model = agent?.model || MODEL;
-  const body = {
-    systemInstruction: { parts: [{ text: `${ROLE_PROMPTS[agent?.role] ?? ''} Your name is ${agent?.name ?? 'Agent'}.` }] },
-    contents: [{ role: 'user', parts: [{ text: task.description ? `${task.title}\n\n${task.description}` : task.title }] }],
-    generationConfig: { maxOutputTokens: MAX_TOKENS },
-  };
-
   try {
-    const res = await fetch(`${GEMINI_BASE}/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': API_KEY },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      let detail = `${res.status}`;
-      try {
-        detail = (await res.json()).error?.message ?? detail;
-      } catch {}
-      throw new Error(`Gemini error: ${detail}`);
-    }
+    if (task.deviceId && !onDevice) throw new Error('The selected PC runner is offline');
 
-    // Stream the answer so progress and output update live.
-    task.output = '';
-    task.progress = 0.1;
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let finishReason = null;
-    let blockReason = null;
-    // Gemini separates SSE events with CRLF; normalise so "\n\n" splits work.
-    const handleEvent = (event) => {
-      for (const line of event.split('\n')) {
-        if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (!payload) continue;
-        const json = JSON.parse(payload);
-        if (json.error) throw new Error(`Gemini error: ${json.error.message ?? json.error.status ?? 'unknown'}`);
-        blockReason = json.promptFeedback?.blockReason ?? blockReason;
-        const cand = json.candidates?.[0];
-        // Skip thought summaries; keep only the answer text.
-        task.output += cand?.content?.parts?.filter((p) => !p.thought).map((p) => p.text ?? '').join('') ?? '';
-        finishReason = cand?.finishReason ?? finishReason;
-      }
-    };
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (value) buf += decoder.decode(value, { stream: !done });
-      buf = buf.replace(/\r\n/g, '\n');
-      let cut;
-      while ((cut = buf.indexOf('\n\n')) >= 0) {
-        handleEvent(buf.slice(0, cut));
-        buf = buf.slice(cut + 2);
-      }
-      if (done) {
-        if (buf.trim()) handleEvent(buf); // last event may lack a trailing blank line
-        break;
-      }
-      // There is no true percentage for an LLM answer; estimate from length.
-      task.progress = Math.min(0.95, 0.1 + 0.85 * (1 - Math.exp(-task.output.length / 2500)));
-      publish(task, false);
+    if (onDevice) {
+      // Tool mode: let the model act on the PC through the runner.
+      const summary = await runWithTools({
+        task,
+        agent,
+        systemText: systemFor(agent, true),
+        deviceId: task.deviceId,
+        hub,
+        deps: {
+          callGemini: (contents, tools, systemText) =>
+            generate({ base: GEMINI_BASE, apiKey: API_KEY, model, systemText, contents, tools, maxTokens: MAX_TOKENS, signal: ctrl.signal }),
+          onLog: (level, msg) => {
+            log(task, level, msg);
+            publish(task, false);
+          },
+          onProgress: (p) => {
+            task.progress = p;
+            publish(task, false);
+          },
+          requestApproval: (call) => askApproval(task, call),
+          isCancelled: () => task.status !== 'running',
+        },
+      });
+      task.output = summary;
+    } else {
+      // Plain mode: stream a text answer.
+      const { finishReason } = await streamText({
+        base: GEMINI_BASE,
+        apiKey: API_KEY,
+        model,
+        systemText: systemFor(agent, false),
+        contents: [{ role: 'user', parts: [{ text: task.description ? `${task.title}\n\n${task.description}` : task.title }] }],
+        maxTokens: MAX_TOKENS,
+        signal: ctrl.signal,
+        onDelta: (chunk) => {
+          task.output += chunk;
+          task.progress = Math.min(0.95, 0.1 + 0.85 * (1 - Math.exp(-task.output.length / 2500)));
+          publish(task, false);
+        },
+      });
+      if (task.status !== 'running') return;
+      if (!task.output.trim()) throw new Error(`Gemini returned no text (finish reason: ${finishReason ?? 'unknown'})`);
+      if (finishReason === 'MAX_TOKENS') log(task, 'warn', 'Answer was cut at the token limit');
     }
-    if (blockReason) throw new Error(`Gemini blocked the prompt (${blockReason})`);
     if (task.status !== 'running') return; // cancelled meanwhile
-    if (!task.output.trim()) throw new Error(`Gemini returned no text (finish reason: ${finishReason ?? 'unknown'})`);
     task.status = 'completed';
     task.progress = 1;
-    log(task, 'success', finishReason === 'MAX_TOKENS' ? 'Finished (answer cut at the token limit)' : 'Finished');
+    log(task, 'success', 'Finished');
   } catch (e) {
     if (task.status === 'cancelled') return;
     task.status = 'failed';
@@ -192,9 +195,26 @@ async function runTask(task) {
     log(task, 'error', e.message);
   } finally {
     running.delete(task.id);
+    // Drop any approval still waiting for this task.
+    for (const [id, a] of pendingApprovals) if (a.taskId === task.id) { a.resolve(false); pendingApprovals.delete(id); }
     publish(task);
     pump();
   }
+}
+
+function deviceName(deviceId) {
+  return hub.list().find((d) => d.id === deviceId)?.name ?? deviceId;
+}
+
+/** Ask the browser to approve a risky tool call; resolves true/false. */
+function askApproval(task, call) {
+  return new Promise((resolve) => {
+    const approvalId = `ap_${randomUUID().slice(0, 8)}`;
+    pendingApprovals.set(approvalId, { resolve, taskId: task.id });
+    task.pendingApproval = { approvalId, label: call.label, reason: call.reason, name: call.name };
+    publish(task);
+    log(task, 'warn', `Waiting for your approval: ${call.label}`);
+  });
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -247,6 +267,48 @@ const server = http.createServer(async (req, res) => {
   try {
     if (parts[1] === 'health') return send(res, 200, { ok: true, model: MODEL, running: running.size, queued: queue.length });
 
+    // ---- PC runner endpoints ----
+    // Runner opens an SSE stream; tool calls are pushed to it as events.
+    if (parts[1] === 'runner' && parts[2] === 'connect') {
+      const deviceId = url.searchParams.get('deviceId');
+      const token = url.searchParams.get('token') || req.headers['x-runner-token'];
+      const name = url.searchParams.get('name') || '';
+      if (RUNNER_TOKEN && token !== RUNNER_TOKEN) return send(res, 401, { error: 'bad runner token' });
+      if (!deviceId) return send(res, 400, { error: 'deviceId required' });
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+      res.write(': connected\n\n');
+      const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
+      const dispose = hub.connect(deviceId, name, res);
+      req.on('close', () => { clearInterval(ping); dispose(); });
+      return;
+    }
+    // Runner reports its work folder and status.
+    if (parts[1] === 'runner' && parts[2] === 'info' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (RUNNER_TOKEN && (b?.token !== RUNNER_TOKEN)) return send(res, 401, { error: 'bad runner token' });
+      hub.setInfo(b?.deviceId, { workDir: b?.workDir });
+      return send(res, 200, { ok: true });
+    }
+    // Runner posts the result of a tool call back.
+    if (parts[1] === 'runner' && parts[2] === 'result' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (RUNNER_TOKEN && (b?.token !== RUNNER_TOKEN)) return send(res, 401, { error: 'bad runner token' });
+      const ok = hub.resolveCall(b?.deviceId, b?.callId, b?.result);
+      return send(res, ok ? 200 : 404, { ok });
+    }
+    // Browser lists connected PCs.
+    if (parts[1] === 'devices' && req.method === 'GET') return send(res, 200, hub.list());
+    // Browser approves or denies a risky tool call.
+    if (parts[1] === 'approvals' && parts[3] && req.method === 'POST') {
+      const approval = pendingApprovals.get(parts[2]);
+      if (!approval) return send(res, 404, { error: 'approval not found or already answered' });
+      pendingApprovals.delete(parts[2]);
+      const task = tasks.get(approval.taskId);
+      if (task) { delete task.pendingApproval; publish(task); }
+      approval.resolve(parts[3] === 'approve');
+      return send(res, 200, { ok: true });
+    }
+
     if (parts[1] === 'events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.write(': connected\n\n');
@@ -283,6 +345,7 @@ const server = http.createServer(async (req, res) => {
           title: String(b.title).slice(0, 200),
           description: String(b.description ?? '').slice(0, 20_000),
           agentId: agent.id,
+          deviceId: b.deviceId && hub.isOnline(b.deviceId) ? String(b.deviceId) : undefined,
           status: 'queued',
           progress: 0,
           logs: [],
@@ -318,14 +381,8 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`Agent Office backend on http://${HOST}:${PORT} using ${MODEL}`);
   // Fail loudly at startup if the configured model can't be used with this key.
-  fetch(`${GEMINI_BASE}/v1beta/models/${encodeURIComponent(MODEL)}`, { headers: { 'x-goog-api-key': API_KEY } })
-    .then(async (r) => {
-      if (r.ok) return console.log(`Model check OK: ${MODEL}`);
-      let msg = `${r.status}`;
-      try {
-        msg = (await r.json()).error?.message ?? msg;
-      } catch {}
-      console.error(`Model check FAILED for ${MODEL}: ${msg}`);
-    })
+  checkModel({ base: GEMINI_BASE, apiKey: API_KEY, model: MODEL })
+    .then((r) => console.log(r.ok ? `Model check OK: ${MODEL}` : `Model check FAILED for ${MODEL}: ${r.detail}`))
     .catch((e) => console.error(`Model check could not reach Gemini: ${e.message}`));
+
 });

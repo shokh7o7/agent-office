@@ -1,0 +1,7 @@
+{
+  "SERVER_URL": "https://office.snapeld.com",
+  "RUNNER_TOKEN": "paste-the-same-token-as-on-the-server",
+  "WORK_DIR": "C:\\AgentWork",
+  "DEVICE_NAME": "My PC",
+  "BASIC_AUTH": "admin:your-site-password"
+}

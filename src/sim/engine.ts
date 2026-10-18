@@ -34,6 +34,8 @@ export interface RemoteTaskUpdate {
   progress?: number;
   output?: string;
   logs?: TaskLog[];
+  deviceId?: string;
+  pendingApproval?: { approvalId: string; label: string; reason?: string; name: string } | null;
 }
 
 /** Demo-only: deterministic duration and failure point for a simulated run. */
@@ -278,6 +280,8 @@ export class Simulation {
     if (task.status === 'cancelled' || task.status === 'completed' || task.status === 'failed') return;
     if (update.progress !== undefined) task.progress = Math.max(0, Math.min(1, update.progress));
     if (update.output !== undefined) task.output = update.output;
+    if (update.deviceId !== undefined) task.deviceId = update.deviceId;
+    if (update.pendingApproval !== undefined) task.pendingApproval = update.pendingApproval;
     if (update.logs) {
       // Backend logs are counted separately from the local ones they are merged into.
       const seen = task.remoteLogCount ?? 0;

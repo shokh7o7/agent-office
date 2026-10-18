@@ -31,3 +31,35 @@ export function HoverTooltip() {
     </div>
   );
 }
+
+/**
+ * Shows risky PC actions that are waiting for the user's decision. A task's
+ * pendingApproval is set by the backend while an agent wants to run something
+ * that isn't on the safe list.
+ */
+export function ApprovalCenter() {
+  const s = useStore();
+  const pending = s.sim.tasks.filter((t) => t.pendingApproval);
+  if (!pending.length) return null;
+  return (
+    <div className="approvals" role="alertdialog" aria-label="Actions awaiting approval">
+      {pending.map((t) => {
+        const a = t.pendingApproval!;
+        const agent = s.sim.state.agents[t.agentId];
+        return (
+          <div key={t.id} className="approval">
+            <div className="approval-head">
+              <strong>{agent?.name ?? 'Agent'}</strong> wants to act on your PC
+            </div>
+            <code className="approval-cmd">{a.label}</code>
+            {a.reason && <div className="approval-reason">{a.reason}</div>}
+            <div className="approval-actions">
+              <button className="btn danger" onClick={() => s.respondApproval(a.approvalId, false)}>Deny</button>
+              <button className="btn primary" onClick={() => s.respondApproval(a.approvalId, true)}>Approve</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

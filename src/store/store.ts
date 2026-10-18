@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import type { AppMode, Settings, SimState } from '../types';
 import { Simulation, emptyState, type NewAgentInput, type Result } from '../sim/engine';
 import { SEED_AGENTS, SEED_TASKS, appearanceFor } from '../sim/seed';
-import type { Backend, ConnectionStatus, RemoteTask } from '../api/adapter';
+import type { Backend, ConnectionStatus, RemoteDevice, RemoteTask } from '../api/adapter';
 import { DemoBackend } from '../api/demoAdapter';
 import { HttpBackend } from '../api/httpAdapter';
 import { ENV_API_BASE_URL } from '../config';
@@ -61,6 +61,8 @@ export class Store {
 
   private backend: Backend = new DemoBackend();
   private disconnect: (() => void) | null = null;
+  private devicePoll: ReturnType<typeof setInterval> | null = null;
+  devices: RemoteDevice[] = [];
   private version = 0;
   private listeners = new Set<Listener>();
   private hoverListeners = new Set<Listener>();
@@ -108,6 +110,8 @@ export class Store {
     this.raf = 0;
     this.disconnect?.();
     this.disconnect = null;
+    if (this.devicePoll) clearInterval(this.devicePoll);
+    this.devicePoll = null;
     window.removeEventListener('beforeunload', this.save);
     this.save();
   }
@@ -238,6 +242,7 @@ export class Store {
         const changed = status !== this.connection.status;
         this.connection = { status, detail };
         if (changed && status === 'connected') void this.syncRemoteAgents().then(() => this.syncActivity());
+        if (changed) this.startDevicePolling(status === 'connected');
         if (changed) this.emit();
       },
       onTask: (t) => this.mergeRemoteTask(t),
@@ -268,6 +273,38 @@ export class Store {
     }
   }
 
+  private startDevicePolling(on: boolean) {
+    if (this.devicePoll) {
+      clearInterval(this.devicePoll);
+      this.devicePoll = null;
+    }
+    if (!on) {
+      this.devices = [];
+      return;
+    }
+    const poll = async () => {
+      try {
+        const next = await this.backend.listDevices();
+        if (JSON.stringify(next) !== JSON.stringify(this.devices)) {
+          this.devices = next;
+          this.emit();
+        }
+      } catch {
+        /* devices are optional */
+      }
+    };
+    void poll();
+    this.devicePoll = setInterval(poll, 4000);
+  }
+
+  async respondApproval(approvalId: string, approve: boolean) {
+    try {
+      await this.backend.respondApproval(approvalId, approve);
+    } catch (e) {
+      this.toast('error', `Couldn't send your decision: ${(e as Error).message}`);
+    }
+  }
+
   private mergeRemoteTask(t: RemoteTask) {
     if (!this.sim.state.tasks[t.id]) {
       if (t.status !== 'queued' && t.status !== 'running') return; // only adopt live work
@@ -279,7 +316,7 @@ export class Store {
   }
 
   // ---------------------------------------------------------------- domain actions
-  async createTask(input: { title: string; description: string; agentId: string }): Promise<boolean> {
+  async createTask(input: { title: string; description: string; agentId: string; deviceId?: string }): Promise<boolean> {
     if (this.settings.mode === 'demo') {
       return this.report(this.sim.createTask(input, { simulated: true }), 'Task assigned (simulated)');
     }

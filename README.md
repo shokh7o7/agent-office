@@ -75,6 +75,24 @@ docker compose up -d --build                          # edit VITE_API_BASE_URL i
 `deploy/nginx-agent-office.conf` is the nginx site (TLS + basic auth). Keep the
 password: anyone who reaches the backend can spend your Gemini quota.
 
+## Let an agent work on your PC (runner)
+
+An agent can read and change files on a computer you control, inside one folder
+you choose. The PC runs a small program (`runner/`) that makes an **outbound**
+connection to the server, so no ports or public IP are needed on the PC.
+
+How it stays safe:
+- The runner refuses any path outside the chosen work folder.
+- Deletes go to the Recycle Bin, never a permanent erase.
+- Reads, writes and common build/test/git commands run automatically; deletes,
+  network commands and anything unusual pause for your **Approve/Deny** in the
+  browser (`server/runner/tools.mjs` holds the policy).
+- Set `RUNNER_TOKEN` on the server; each runner must present the same token.
+
+Server: set `RUNNER_TOKEN` in `/etc/agent-office.env`, recreate the container.
+PC: see `runner/README.md` — fill `runner.config.json`, run `node runner.mjs`,
+then pick the PC under **Run on** when you create a task.
+
 ## Structure
 
 ```

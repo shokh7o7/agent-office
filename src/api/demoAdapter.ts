@@ -1,4 +1,4 @@
-import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteTask } from './adapter';
+import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteDevice, RemoteTask } from './adapter';
 
 /**
  * Demo mode: all work runs in the in-browser simulation and is labelled as
@@ -31,4 +31,8 @@ export class DemoBackend implements Backend {
   async listActivity(): Promise<RemoteActivity[]> {
     return [];
   }
+  async listDevices(): Promise<RemoteDevice[]> {
+    return [];
+  }
+  async respondApproval(): Promise<void> {}
 }

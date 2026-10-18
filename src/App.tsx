@@ -8,7 +8,7 @@ import { ManagementView } from './ui/ManagementView';
 import { TaskForm } from './ui/TaskForm';
 import { AgentEditor } from './ui/AgentEditor';
 import { Settings } from './ui/Settings';
-import { HoverTooltip, Toasts } from './ui/Overlays';
+import { ApprovalCenter, HoverTooltip, Toasts } from './ui/Overlays';
 
 export default function App() {
   const s = useStore();
@@ -34,6 +34,7 @@ export default function App() {
       {s.ui.taskForm.open && <TaskForm />}
       {s.ui.agentEditor.open && <AgentEditor />}
       {s.ui.settingsOpen && <Settings />}
+      <ApprovalCenter />
       <Toasts />
     </div>
   );
