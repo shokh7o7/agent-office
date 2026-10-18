@@ -110,8 +110,13 @@ export async function runWithTools({ task, agent, systemText, deviceId, hub, dep
       return text; // final answer
     }
 
-    // Record the model's request turn so the conversation stays valid.
-    contents.push({ role: 'model', parts: calls.map((c) => ({ functionCall: { name: c.name, args: c.args ?? {} } })) });
+    // Echo the model's turn back exactly as received (keeps thoughtSignature,
+    // which Gemini requires for tool use). Fall back to rebuilt parts only if
+    // the raw turn is unavailable (e.g. older test doubles).
+    contents.push({
+      role: 'model',
+      parts: reply.parts?.length ? reply.parts : calls.map((c) => ({ functionCall: { name: c.name, args: c.args ?? {} } })),
+    });
 
     const responseParts = [];
     for (const call of calls) {

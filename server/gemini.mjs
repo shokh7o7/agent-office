@@ -102,7 +102,7 @@ export async function streamText({ base, apiKey, model, systemText, contents, ma
 
 /**
  * One non-streamed call that may return function calls.
- * Returns { text, functionCalls: [{name, args}], finishReason }.
+ * Returns { text, functionCalls: [{name, args}], parts (raw model turn), finishReason }.
  */
 export async function generate({ base, apiKey, model, systemText, contents, tools, maxTokens, signal, onRetry }) {
   const res = await fetchWithRetry(endpoint(base, model, 'generateContent'), {
@@ -123,7 +123,10 @@ export async function generate({ base, apiKey, model, systemText, contents, tool
   const parts = cand?.content?.parts ?? [];
   const functionCalls = parts.filter((p) => p.functionCall).map((p) => ({ name: p.functionCall.name, args: p.functionCall.args ?? {} }));
   const text = parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('');
-  return { text, functionCalls, finishReason: cand?.finishReason ?? null };
+  // `parts` is the model turn exactly as received. It must be echoed back
+  // unchanged on the next request: newer models attach a thoughtSignature to
+  // functionCall parts and reject the conversation if it is missing.
+  return { text, functionCalls, parts, finishReason: cand?.finishReason ?? null };
 }
 
 /** Lightweight check that a model is usable with this key. */
