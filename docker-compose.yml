@@ -1,0 +1,16 @@
+services:
+  agent-office:
+    build:
+      context: .
+      args:
+        VITE_API_BASE_URL: https://office.snapeld.com
+    container_name: agent-office
+    restart: unless-stopped
+    env_file: /etc/agent-office.env   # GEMINI_API_KEY lives here, not in the repo
+    ports:
+      - "127.0.0.1:8787:8787"          # only nginx on this host can reach it
+    volumes:
+      - agent-office-data:/data
+
+volumes:
+  agent-office-data:
