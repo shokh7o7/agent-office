@@ -3,6 +3,40 @@
 //   generate    — one non-streamed call that may return function calls (tools)
 const V = 'v1beta';
 
+// Thinking: GEMINI_THINKING = high (default) | low | off | <token budget number>.
+// Models that reject the setting are remembered and called without it.
+const THINKING = (process.env.GEMINI_THINKING || 'high').toLowerCase();
+const noThinking = new Set();
+
+function thinkingConfig(model) {
+  if (THINKING === 'off' || noThinking.has(model)) return undefined;
+  if (/^-?\d+$/.test(THINKING)) return { thinkingBudget: Number(THINKING) };
+  return { thinkingLevel: THINKING === 'low' ? 'low' : 'high' };
+}
+
+/** POST with retries; if the model rejects thinkingConfig, retry once without it. */
+async function postModel(url, model, body, signal, onRetry) {
+  const { __key: apiKey, ...payload } = body; // the key goes in a header only, never in the body
+  const build = () => {
+    const cfg = { ...(payload.generationConfig || {}) };
+    const t = thinkingConfig(model);
+    if (t) cfg.thinkingConfig = t;
+    else delete cfg.thinkingConfig;
+    return JSON.stringify({ ...payload, generationConfig: cfg });
+  };
+  const send = () =>
+    fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, body: build(), signal }, onRetry);
+  let res = await send();
+  if (res.status === 400 && thinkingConfig(model)) {
+    const text = await res.clone().text();
+    if (/thinking/i.test(text)) {
+      noThinking.add(model);
+      res = await send();
+    }
+  }
+  return res;
+}
+
 function endpoint(base, model, method) {
   return `${base}/${V}/models/${encodeURIComponent(model)}:${method}`;
 }
@@ -45,16 +79,18 @@ async function readError(res) {
  * Returns { text, finishReason }. Throws on HTTP or block errors.
  */
 export async function streamText({ base, apiKey, model, systemText, contents, maxTokens, signal, onDelta, onRetry }) {
-  const res = await fetchWithRetry(endpoint(base, model, 'streamGenerateContent') + '?alt=sse', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({
+  const res = await postModel(
+    endpoint(base, model, 'streamGenerateContent') + '?alt=sse',
+    model,
+    {
+      __key: apiKey,
       systemInstruction: systemText ? { parts: [{ text: systemText }] } : undefined,
       contents,
       generationConfig: { maxOutputTokens: maxTokens },
-    }),
+    },
     signal,
-  }, onRetry);
+    onRetry,
+  );
   if (!res.ok) throw new Error(await readError(res));
 
   const reader = res.body.getReader();
@@ -105,17 +141,19 @@ export async function streamText({ base, apiKey, model, systemText, contents, ma
  * Returns { text, functionCalls: [{name, args}], parts (raw model turn), finishReason }.
  */
 export async function generate({ base, apiKey, model, systemText, contents, tools, maxTokens, signal, onRetry }) {
-  const res = await fetchWithRetry(endpoint(base, model, 'generateContent'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({
+  const res = await postModel(
+    endpoint(base, model, 'generateContent'),
+    model,
+    {
+      __key: apiKey,
       systemInstruction: systemText ? { parts: [{ text: systemText }] } : undefined,
       contents,
       tools,
       generationConfig: { maxOutputTokens: maxTokens },
-    }),
+    },
     signal,
-  }, onRetry);
+    onRetry,
+  );
   if (!res.ok) throw new Error(await readError(res));
   const json = await res.json();
   if (json.promptFeedback?.blockReason) throw new Error(`Gemini blocked the prompt (${json.promptFeedback.blockReason})`);

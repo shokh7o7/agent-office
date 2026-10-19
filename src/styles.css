@@ -1084,3 +1084,16 @@ h4 {
   justify-content: flex-end;
   margin-top: 8px;
 }
+
+.form label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+.form label.check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--navy);
+}

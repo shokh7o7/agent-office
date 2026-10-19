@@ -1,4 +1,4 @@
-import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteDevice, RemoteTask } from './adapter';
+import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteAgentPatch, RemoteDevice, RemoteTask } from './adapter';
 
 /**
  * Demo mode: all work runs in the in-browser simulation and is labelled as
@@ -15,6 +15,9 @@ export class DemoBackend implements Backend {
   }
   async createAgent(input: RemoteAgentInput): Promise<RemoteAgent> {
     return { id: '', ...input };
+  }
+  async updateAgent(id: string, patch: RemoteAgentPatch): Promise<RemoteAgent> {
+    return { id, name: patch.name ?? '', role: patch.role ?? 'Developer', ...patch };
   }
   async listTasks(): Promise<RemoteTask[]> {
     return [];

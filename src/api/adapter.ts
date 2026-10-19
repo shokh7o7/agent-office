@@ -1,4 +1,4 @@
-import type { AgentRole, AppMode, TaskLog, TaskStatus } from '../types';
+import type { AgentRole, AppMode, Appearance, TaskLog, TaskStatus } from '../types';
 
 /**
  * Contract the frontend expects from a backend. The backend owns provider
@@ -20,7 +20,11 @@ export interface RemoteAgent {
   provider?: string;
   model?: string;
   enabled?: boolean;
+  /** Server-owned look, shared with the PC app. */
+  appearance?: Appearance;
 }
+
+export type RemoteAgentPatch = Partial<Pick<RemoteAgent, 'name' | 'role' | 'model' | 'enabled' | 'appearance'>>;
 
 export type RemoteAgentInput = Omit<RemoteAgent, 'id'>;
 
@@ -65,8 +69,9 @@ export interface Backend {
   connect(h: BackendHandlers): () => void;
   listAgents(): Promise<RemoteAgent[]>;
   createAgent(input: RemoteAgentInput): Promise<RemoteAgent>;
+  updateAgent(id: string, patch: RemoteAgentPatch): Promise<RemoteAgent>;
   listTasks(): Promise<RemoteTask[]>;
-  createTask(input: { title: string; description: string; agentId: string; deviceId?: string }): Promise<RemoteTask>;
+  createTask(input: { title: string; description: string; agentId: string; deviceId?: string; quality?: 'fast' | 'strong' }): Promise<RemoteTask>;
   getTask(id: string): Promise<RemoteTask>;
   cancelTask(id: string): Promise<RemoteTask>;
   listActivity(): Promise<RemoteActivity[]>;

@@ -1,4 +1,4 @@
-import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteDevice, RemoteTask } from './adapter';
+import type { Backend, BackendHandlers, RemoteActivity, RemoteAgent, RemoteAgentInput, RemoteAgentPatch, RemoteDevice, RemoteTask } from './adapter';
 
 /** Real mode: talks to a backend implementing the contract in adapter.ts. */
 export class HttpBackend implements Backend {
@@ -73,10 +73,13 @@ export class HttpBackend implements Backend {
   createAgent(input: RemoteAgentInput) {
     return this.req<RemoteAgent>('/api/agents', { method: 'POST', body: JSON.stringify(input) });
   }
+  updateAgent(id: string, patch: RemoteAgentPatch) {
+    return this.req<RemoteAgent>(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) });
+  }
   listTasks() {
     return this.req<RemoteTask[]>('/api/tasks');
   }
-  createTask(input: { title: string; description: string; agentId: string; deviceId?: string }) {
+  createTask(input: { title: string; description: string; agentId: string; deviceId?: string; quality?: 'fast' | 'strong' }) {
     return this.req<RemoteTask>('/api/tasks', { method: 'POST', body: JSON.stringify(input) });
   }
   getTask(id: string) {

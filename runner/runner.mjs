@@ -66,6 +66,8 @@ const authHeader = cfg.basicAuth ? { Authorization: 'Basic ' + Buffer.from(cfg.b
 
 // ---------------------------------------------------------------- safety
 const MAX_READ = 2 * 1024 * 1024; // 2 MB per file read
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'bin', 'obj', 'dist', 'build', '.venv', 'venv', '__pycache__', '.vs', '.idea', '.next', '.trash']);
+const CAPABILITIES = ['list_dir', 'list_tree', 'search_files', 'read_file', 'read_file_lines', 'write_file', 'edit_file', 'delete_file', 'run_command'];
 const CMD_TIMEOUT = 5 * 60 * 1000;
 
 /** Resolve a user-supplied relative path and refuse anything outside workDir. */
@@ -91,12 +93,76 @@ const tools = {
     };
   },
 
-  async read_file({ path: rel }) {
+  async read_file({ path: rel, start_line, end_line }) {
     const file = safePath(rel);
     const stat = await fsp.stat(file);
     if (stat.isDirectory()) throw new Error('That path is a folder, not a file');
     if (stat.size > MAX_READ) throw new Error(`File is too large to read (${(stat.size / 1e6).toFixed(1)} MB, limit 2 MB)`);
-    return { path: rel, content: await fsp.readFile(file, 'utf8') };
+    const content = await fsp.readFile(file, 'utf8');
+    if (!start_line && !end_line) return { path: rel, content };
+    const lines = content.split(/\r?\n/);
+    const from = Math.max(1, Number(start_line) || 1);
+    const to = Math.min(lines.length, Number(end_line) || lines.length);
+    const numbered = lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(5)}  ${l}`).join('\n');
+    return { path: rel, start_line: from, end_line: to, total_lines: lines.length, content: numbered };
+  },
+
+  async list_tree({ path: rel = '.', depth = 4 }) {
+    const root = safePath(rel);
+    const maxDepth = Math.min(6, Math.max(1, Number(depth) || 4));
+    const lines = [];
+    let count = 0;
+    async function walk(dir, prefix, level) {
+      if (level > maxDepth || count >= 2000) return;
+      let entries = await fsp.readdir(dir, { withFileTypes: true });
+      entries = entries.filter((e) => !SKIP_DIRS.has(e.name) && !e.isSymbolicLink()).sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1));
+      for (const e of entries) {
+        if (count++ >= 2000) { lines.push(`${prefix}… (truncated)`); return; }
+        lines.push(`${prefix}${e.name}${e.isDirectory() ? '/' : ''}`);
+        if (e.isDirectory()) await walk(path.join(dir, e.name), prefix + '  ', level + 1);
+      }
+    }
+    await walk(root, '', 1);
+    return { path: rel, tree: lines.join('\n'), entries: count };
+  },
+
+  async search_files({ query, path: rel = '.', glob }) {
+    if (!query) throw new Error('query is required');
+    const root = safePath(rel);
+    const needle = String(query).toLowerCase();
+    const globRe = glob ? new RegExp('^' + String(glob).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i') : null;
+    const matches = [];
+    async function walk(dir) {
+      if (matches.length >= 200) return;
+      for (const e of await fsp.readdir(dir, { withFileTypes: true })) {
+        if (SKIP_DIRS.has(e.name) || e.isSymbolicLink()) continue; // never follow links out of the folder
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { await walk(full); continue; }
+        if (globRe && !globRe.test(e.name)) continue;
+        const st = await fsp.stat(full);
+        if (st.size > 1024 * 1024) continue;
+        const text = await fsp.readFile(full, 'utf8').catch(() => '');
+        if (text.includes('\0')) continue; // binary
+        const lines = text.split(/\r?\n/);
+        for (let i = 0; i < lines.length && matches.length < 200; i++)
+          if (lines[i].toLowerCase().includes(needle))
+            matches.push({ file: path.relative(cfg.workDir, full).replace(/\\/g, '/'), line: i + 1, text: lines[i].trim().slice(0, 300) });
+      }
+    }
+    await walk(root);
+    return { query, matches, truncated: matches.length >= 200 };
+  },
+
+  async edit_file({ path: rel, old_text, new_text }) {
+    const file = safePath(rel);
+    if (typeof old_text !== 'string' || !old_text) throw new Error('old_text is required');
+    const content = await fsp.readFile(file, 'utf8');
+    const first = content.indexOf(old_text);
+    if (first < 0) throw new Error('old_text was not found in the file (read the file again and copy the exact text)');
+    if (content.indexOf(old_text, first + 1) >= 0) throw new Error('old_text appears more than once; include more surrounding lines to make it unique');
+    const next = content.slice(0, first) + String(new_text ?? '') + content.slice(first + old_text.length);
+    await fsp.writeFile(file, next, 'utf8');
+    return { path: rel, ok: true, replaced: 1 };
   },
 
   async write_file({ path: rel, content }) {
@@ -204,7 +270,7 @@ async function connectOnce() {
   if (!res.ok) throw new Error(`connect -> ${res.status}`);
   console.log(`[runner] connected as "${cfg.deviceName}" (${cfg.deviceId})`);
   console.log(`[runner] work folder: ${cfg.workDir}`);
-  await post('info', { workDir: cfg.workDir }).catch(() => {});
+  await post('info', { workDir: cfg.workDir, capabilities: CAPABILITIES, version: 'node-runner-0.2' }).catch(() => {});
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();

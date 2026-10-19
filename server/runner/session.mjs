@@ -2,9 +2,10 @@
 // the model asks to call a tool, we classify it, auto-run safe ones or wait
 // for the user's approval, forward the call to the PC, feed the result back
 // to the model, and repeat until the model gives a final text answer.
-import { classify, describe, TOOL_DECLARATIONS } from './tools.mjs';
+import { classify, declarationsFor, describe } from './tools.mjs';
 
-const MAX_STEPS = 24; // cap tool calls per task so a loop can't run forever
+// Cap model turns per task so a loop can't run forever. Deep work needs room.
+const MAX_STEPS = Math.max(5, Number(process.env.MAX_TOOL_STEPS || 60));
 
 /**
  * A registry of PC runners connected over SSE, keyed by device id. Each runner
@@ -18,7 +19,7 @@ export class RunnerHub {
   connect(deviceId, name, res) {
     const existing = this.runners.get(deviceId);
     if (existing) existing.res.end(); // one connection per device
-    const runner = { res, name: name || deviceId, workDir: null, pending: new Map(), lastSeen: Date.now() };
+    const runner = { res, name: name || deviceId, workDir: null, capabilities: [], version: '', pending: new Map(), lastSeen: Date.now() };
     this.runners.set(deviceId, runner);
     this.sendTo(deviceId, 'hello', { ok: true });
     return () => {
@@ -31,12 +32,18 @@ export class RunnerHub {
     const r = this.runners.get(deviceId);
     if (r) {
       r.workDir = info.workDir ?? r.workDir;
+      if (Array.isArray(info.capabilities)) r.capabilities = info.capabilities.filter((c) => typeof c === 'string').slice(0, 50);
+      if (typeof info.version === 'string') r.version = info.version.slice(0, 40);
       r.lastSeen = Date.now();
     }
   }
 
   list() {
-    return [...this.runners.entries()].map(([id, r]) => ({ id, name: r.name, workDir: r.workDir, online: true }));
+    return [...this.runners.entries()].map(([id, r]) => ({ id, name: r.name, workDir: r.workDir, version: r.version, capabilities: r.capabilities, online: true }));
+  }
+
+  capabilities(deviceId) {
+    return this.runners.get(deviceId)?.capabilities ?? [];
   }
 
   isOnline(deviceId) {
@@ -95,7 +102,7 @@ const nextCallId = () => `call_${Date.now().toString(36)}_${(callSeq = (callSeq 
  */
 export async function runWithTools({ task, agent, systemText, deviceId, hub, deps }) {
   const contents = [{ role: 'user', parts: [{ text: task.description ? `${task.title}\n\n${task.description}` : task.title }] }];
-  const tools = [{ functionDeclarations: TOOL_DECLARATIONS }];
+  const tools = [{ functionDeclarations: declarationsFor(hub.capabilities(deviceId)) }];
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (deps.isCancelled()) throw new Error('Cancelled');
@@ -145,6 +152,7 @@ export async function runWithTools({ task, agent, systemText, deviceId, hub, dep
           // Display-only context for the PC app ("Jasur is working on …"). Runners may ignore it.
           agentName: agent?.name,
           taskTitle: task.title,
+          agent: agent ? { id: agent.id, name: agent.name, role: agent.role, appearance: agent.appearance } : undefined,
         });
         if (result?.error) deps.onLog('warn', `${call.name}: ${result.error}`);
         responseParts.push(fnResult(call.name, result ?? {}));

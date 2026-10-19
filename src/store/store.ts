@@ -253,8 +253,14 @@ export class Store {
     try {
       const remote = await this.backend.listAgents();
       for (const ra of remote) {
-        if (this.sim.state.agents[ra.id]) continue;
-        const r = this.sim.addAgent({ name: ra.name, role: ra.role, provider: ra.provider, model: ra.model, appearance: appearanceFor(ra.id) }, ra.id);
+        const look = ra.appearance ?? appearanceFor(ra.id);
+        const existing = this.sim.state.agents[ra.id];
+        if (existing) {
+          // The server owns name, role and look; keep them in sync with the PC app.
+          Object.assign(existing, { name: ra.name, role: ra.role, appearance: look, model: ra.model, provider: ra.provider });
+          continue;
+        }
+        const r = this.sim.addAgent({ name: ra.name, role: ra.role, provider: ra.provider, model: ra.model, appearance: look }, ra.id);
         if (r.ok && ra.enabled === false) this.sim.setEnabled(ra.id, false);
       }
       this.emit();
@@ -316,7 +322,7 @@ export class Store {
   }
 
   // ---------------------------------------------------------------- domain actions
-  async createTask(input: { title: string; description: string; agentId: string; deviceId?: string }): Promise<boolean> {
+  async createTask(input: { title: string; description: string; agentId: string; deviceId?: string; quality?: 'fast' | 'strong' }): Promise<boolean> {
     if (this.settings.mode === 'demo') {
       return this.report(this.sim.createTask(input, { simulated: true }), 'Task assigned (simulated)');
     }
@@ -355,7 +361,7 @@ export class Store {
   async addAgent(input: NewAgentInput): Promise<string | null> {
     if (this.settings.mode === 'real') {
       try {
-        const ra = await this.backend.createAgent({ name: input.name, role: input.role, provider: input.provider, model: input.model });
+        const ra = await this.backend.createAgent({ name: input.name, role: input.role, provider: input.provider, model: input.model, appearance: input.appearance });
         const r = this.sim.addAgent(input, ra.id);
         return this.report(r, `${input.name} joined the office`) ? r.value.id : null;
       } catch (e) {
@@ -368,7 +374,15 @@ export class Store {
   }
 
   updateAgent(id: string, patch: Parameters<Simulation['updateAgent']>[1]) {
-    return this.report(this.sim.updateAgent(id, patch), 'Agent saved');
+    const ok = this.report(this.sim.updateAgent(id, patch), 'Agent saved');
+    if (ok && this.settings.mode === 'real') {
+      // Persist on the server so the look/name is the same everywhere (office + PC app).
+      const { name, role, appearance, model } = patch;
+      this.backend.updateAgent(id, { name, role, appearance, model }).catch((e) =>
+        this.toast('error', `Saved here, but the server rejected it: ${(e as Error).message}`),
+      );
+    }
+    return ok;
   }
 
   setAgentEnabled(id: string, enabled: boolean) {

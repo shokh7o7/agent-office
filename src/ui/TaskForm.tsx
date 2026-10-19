@@ -10,6 +10,7 @@ export function TaskForm() {
   const [description, setDescription] = useState('');
   const [agentId, setAgentId] = useState(s.ui.taskForm.agentId ?? enabled.find((a) => !s.sim.isBusy(a))?.id ?? enabled[0]?.id ?? '');
   const [deviceId, setDeviceId] = useState('');
+  const [strong, setStrong] = useState(false);
   const [busy, setBusy] = useState(false);
   const devices = s.settings.mode === 'real' ? s.devices.filter((d) => d.online) : [];
   const close = () => s.setUI({ taskForm: { open: false, agentId: null } });
@@ -18,7 +19,7 @@ export function TaskForm() {
     e.preventDefault();
     if (busy) return; // prevents double assignment on double-click
     setBusy(true);
-    const ok = await s.createTask({ title, description, agentId, deviceId: deviceId || undefined });
+    const ok = await s.createTask({ title, description, agentId, deviceId: deviceId || undefined, quality: strong ? 'strong' : 'fast' });
     setBusy(false);
     if (ok) close();
   };
@@ -61,6 +62,12 @@ export function TaskForm() {
                   </option>
                 ))}
               </select>
+            </label>
+          )}
+          {s.settings.mode === 'real' && (
+            <label className="check">
+              <input type="checkbox" checked={strong} onChange={(e) => setStrong(e.target.checked)} />
+              Strong mode — deeper thinking with the Pro model (slower, uses more quota)
             </label>
           )}
           <p className="hint">

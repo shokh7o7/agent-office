@@ -14,12 +14,16 @@
 //   GEMINI_BASE_URL     override for testing (default: Google's endpoint)
 //   STATIC_DIR          if set, also serves the built frontend from this folder
 //   RUNNER_TOKEN        if set, PC runners must present it to connect (recommended)
+//   GEMINI_STRONG_MODEL model for "strong" tasks (default: gemini-pro-latest)
+//   GEMINI_THINKING     high (default) | low | off | <token budget>
+//   MAX_TOOL_STEPS      model turns allowed per PC task (default: 60)
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { streamText, generate, checkModel } from './gemini.mjs';
 import { RunnerHub, runWithTools } from './runner/session.mjs';
+import { appearanceFor, sanitizeAppearance, DEFAULT_LOOKS } from './appearance.mjs';
 
 const env = process.env;
 const API_KEY = env.GEMINI_API_KEY;
@@ -28,7 +32,8 @@ if (!API_KEY) {
   process.exit(1);
 }
 const MODEL = env.GEMINI_MODEL || 'gemini-flash-latest';
-const MAX_TOKENS = Number(env.GEMINI_MAX_TOKENS || 8192);
+const STRONG_MODEL = env.GEMINI_STRONG_MODEL || 'gemini-pro-latest';
+const MAX_TOKENS = Number(env.GEMINI_MAX_TOKENS || 16384);
 const PORT = Number(env.PORT || 8787);
 const HOST = env.HOST || '127.0.0.1';
 const ALLOWED_ORIGIN = env.ALLOWED_ORIGIN || '';
@@ -59,14 +64,34 @@ const ROLE_PROMPTS = {
 };
 
 function systemFor(agent, withTools) {
-  const base = `${ROLE_PROMPTS[agent?.role] ?? ''} Your name is ${agent?.name ?? 'Agent'}.`;
+  const base =
+    `${ROLE_PROMPTS[agent?.role] ?? ''} Your name is ${agent?.name ?? 'Agent'}. ` +
+    'Reply in the language the user wrote in (often Uzbek). Be concrete; never pad answers.';
   if (!withTools) return base;
-  return (
-    base +
-    ' You can act on the user\'s PC through the provided tools, but only inside their chosen work folder. ' +
-    'Work in small steps: inspect files before changing them, make one change at a time, and run tests when relevant. ' +
-    'Deletions move files to the Recycle Bin. When the task is done, reply with a short summary of what you changed.'
-  );
+  return `${base}
+
+You are working directly on the user's computer through tools, confined to their chosen work folder.
+Work like a careful senior engineer:
+
+1. UNDERSTAND FIRST. Start with list_tree (if available, else list_dir) on ".". Read the files that matter:
+   README, package.json / *.csproj / requirements.txt, config files, entry points, and the files your task
+   touches. Use search_files to find where things are defined and used. Do not guess file contents.
+2. PLAN. Decide the smallest set of changes that fully solves the task. If the request is vague
+   (e.g. "add a page" or "improve the design"), make sensible professional choices that fit the existing
+   project's stack, style and structure, and state the choices in your summary.
+3. CHANGE CAREFULLY. Prefer edit_file for existing files (exact, unique old_text); use write_file for new
+   files. Keep the project's conventions (naming, formatting, framework, CSS approach). Never delete or
+   overwrite unrelated work. Deletions go to the Recycle Bin and need the user's approval.
+4. VERIFY. Re-read changed files. If the project has build/test/lint commands, run them with run_command
+   and fix what you broke. Do not start long-running dev servers.
+5. REPORT. Finish with a short summary: what you changed (file list), how to see/run it, and anything left.
+
+Quality bar:
+- Design/UI: modern, clean and consistent; responsive (mobile + desktop); accessible contrast and focus
+  states; real content, no lorem ipsum; reuse existing styles, variables and components.
+- Code: readable, typed where the project is typed, with error handling and input validation.
+- Backend: validate inputs, handle errors, never hard-code secrets, keep APIs consistent.
+If a tool returns an error, read it and adapt instead of repeating the same call.`;
 }
 
 // ---------------------------------------------------------------- state
@@ -88,7 +113,11 @@ function load() {
 const state = load();
 // Agents follow GEMINI_MODEL unless one was set explicitly for that agent
 // (modelOverride). Older state files stored the default as `model`; drop it.
-for (const a of state.agents) Object.assign(a, { provider: 'google', model: a.modelOverride || MODEL });
+for (const a of state.agents) {
+  Object.assign(a, { provider: 'google', model: a.modelOverride || MODEL });
+  // Looks are server-owned so the office and the PC app draw the same person.
+  a.appearance = sanitizeAppearance(a.appearance) || DEFAULT_LOOKS[a.id] || appearanceFor(a.id);
+}
 // Anything left running by a previous process can't be resumed.
 for (const t of state.tasks) if (t.status === 'running' || t.status === 'queued') Object.assign(t, { status: 'failed', output: 'Server restarted before this task finished. Assign it again.' });
 const tasks = new Map(state.tasks.map((t) => [t.id, t]));
@@ -140,7 +169,7 @@ async function runTask(task) {
   task.status = 'running';
   task.progress = 0.05;
   task.output = '';
-  const model = agent?.model || MODEL;
+  const model = task.quality === 'strong' ? STRONG_MODEL : agent?.model || MODEL;
   const onDevice = task.deviceId && hub.isOnline(task.deviceId);
   log(task, 'info', onDevice ? `Working on PC “${deviceName(task.deviceId)}” via ${model}` : `Sent to ${model}`);
   publish(task);
@@ -266,7 +295,7 @@ const server = http.createServer(async (req, res) => {
   if (ALLOWED_ORIGIN) {
     res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
   }
   if (req.method === 'OPTIONS') return res.writeHead(204).end();
   const url = new URL(req.url, 'http://localhost');
@@ -274,7 +303,7 @@ const server = http.createServer(async (req, res) => {
   if (parts[0] !== 'api') return STATIC_DIR && req.method === 'GET' ? serveStatic(url.pathname, res) : send(res, 404, { error: 'not found' });
 
   try {
-    if (parts[1] === 'health') return send(res, 200, { ok: true, model: MODEL, running: running.size, queued: queue.length });
+    if (parts[1] === 'health') return send(res, 200, { ok: true, model: MODEL, strongModel: STRONG_MODEL, running: running.size, queued: queue.length });
 
     // ---- PC runner endpoints ----
     // Runner opens an SSE stream; tool calls are pushed to it as events.
@@ -295,7 +324,7 @@ const server = http.createServer(async (req, res) => {
     if (parts[1] === 'runner' && parts[2] === 'info' && req.method === 'POST') {
       const b = await readBody(req);
       if (RUNNER_TOKEN && (b?.token !== RUNNER_TOKEN)) return send(res, 401, { error: 'bad runner token' });
-      hub.setInfo(b?.deviceId, { workDir: b?.workDir });
+      hub.setInfo(b?.deviceId, { workDir: b?.workDir, capabilities: b?.capabilities, version: b?.version });
       return send(res, 200, { ok: true });
     }
     // Runner posts the result of a tool call back.
@@ -330,15 +359,45 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (parts[1] === 'agents' && req.method === 'GET') return send(res, 200, state.agents);
-    if (parts[1] === 'agents' && req.method === 'POST') {
+    if (parts[1] === 'agents' && !parts[2] && req.method === 'GET') return send(res, 200, state.agents);
+    if (parts[1] === 'agents' && !parts[2] && req.method === 'POST') {
       const b = await readBody(req);
       if (!b?.name || !ROLES.includes(b.role)) return send(res, 400, { error: `name and role (${ROLES.join(', ')}) are required` });
       const override = b.model ? String(b.model).slice(0, 80) : undefined;
-      const agent = { id: `gm-${randomUUID().slice(0, 8)}`, name: String(b.name).slice(0, 40), role: b.role, provider: 'google', model: override || MODEL, modelOverride: override, enabled: true };
+      const id = `gm-${randomUUID().slice(0, 8)}`;
+      const agent = { id, name: String(b.name).slice(0, 40), role: b.role, provider: 'google', model: override || MODEL, modelOverride: override, enabled: true, appearance: sanitizeAppearance(b.appearance) || appearanceFor(id) };
       state.agents.push(agent);
       save();
       return send(res, 201, agent);
+    }
+
+    // Edit an agent (name, role, look, model, enabled). Keeps the office and PC app in sync.
+    if (parts[1] === 'agents' && parts[2] && (req.method === 'PATCH' || req.method === 'POST')) {
+      const agent = state.agents.find((a) => a.id === parts[2]);
+      if (!agent) return send(res, 404, { error: 'agent not found' });
+      const b = await readBody(req);
+      if (!b) return send(res, 400, { error: 'invalid JSON' });
+      if (b.name !== undefined) {
+        const name = String(b.name).trim().slice(0, 40);
+        if (!name) return send(res, 400, { error: 'name cannot be empty' });
+        agent.name = name;
+      }
+      if (b.role !== undefined) {
+        if (!ROLES.includes(b.role)) return send(res, 400, { error: `role must be one of ${ROLES.join(', ')}` });
+        agent.role = b.role;
+      }
+      if (b.appearance !== undefined) {
+        const look = sanitizeAppearance(b.appearance);
+        if (!look) return send(res, 400, { error: 'invalid appearance' });
+        agent.appearance = look;
+      }
+      if (b.model !== undefined) {
+        agent.modelOverride = b.model ? String(b.model).slice(0, 80) : undefined;
+        agent.model = agent.modelOverride || MODEL;
+      }
+      if (b.enabled !== undefined) agent.enabled = !!b.enabled;
+      save();
+      return send(res, 200, agent);
     }
 
     if (parts[1] === 'activity') return send(res, 200, state.activity.slice(-200));
@@ -355,6 +414,7 @@ const server = http.createServer(async (req, res) => {
           description: String(b.description ?? '').slice(0, 20_000),
           agentId: agent.id,
           deviceId: b.deviceId && hub.isOnline(b.deviceId) ? String(b.deviceId) : undefined,
+          quality: b.quality === 'strong' ? 'strong' : 'fast',
           status: 'queued',
           progress: 0,
           logs: [],
